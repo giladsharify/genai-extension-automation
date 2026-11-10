@@ -1,0 +1,35 @@
+{
+  "name": "genai-extension-automation",
+  "version": "1.0.0",
+  "description": "Playwright automation verifying the Prompt Security extension allows/blocks GenAI apps",
+  "scripts": {
+    "fetch-extension": "node scripts/fetch-extension.ts",
+    "pretest": "node scripts/fetch-extension.ts",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "report": "playwright show-report"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/giladsharify/genai-extension-automation.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/giladsharify/genai-extension-automation/issues"
+  },
+  "homepage": "https://github.com/giladsharify/genai-extension-automation#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@types/adm-zip": "^0.5.8",
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^26.6.6",
+    "adm-zip": "^0.6.1",
+    "dotenv": "^18.0.10",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
