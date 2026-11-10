@@ -26,14 +26,23 @@ export class ExtensionPopup {
     return this.page.locator('#saveButton');
   }
 
-  async configure(apiDomain: string, apiKey: string): Promise<void> {
+  /**
+   * Fill in and click Save. Saving is asynchronous, so callers must wait for the
+   * values to be persisted (see waitForStoredSettings in fixtures.ts) before
+   * reloading or closing the popup.
+   */
+  async save(apiDomain: string, apiKey: string): Promise<void> {
     await this.apiDomain.fill(apiDomain);
     await this.apiKey.fill(apiKey);
     await this.saveButton.click();
-    // Saving persists the values; reopening the popup should show them.
+  }
+
+  /** Reopen the popup and check it shows the saved settings. */
+  async expectShowsSaved(apiDomain: string, apiKey: string): Promise<void> {
     await this.page.reload();
     await expect(this.apiDomain).toHaveValue(apiDomain);
-    await expect(this.apiKey).toHaveValue(apiKey);
+    // Compare without putting the secret in the assertion message.
+    expect((await this.apiKey.inputValue()) === apiKey, 'popup shows the saved API key').toBe(true);
   }
 
   async close(): Promise<void> {

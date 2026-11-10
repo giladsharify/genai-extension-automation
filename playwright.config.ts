@@ -22,7 +22,9 @@ export default defineConfig<Options>({
   ],
   use: {
     headless: true,
-    trace: 'retain-on-failure',
+    // Traces record typed values (the API key) and request URLs (which carry the key),
+    // and CI artifacts of a public repo are downloadable, so only keep traces locally.
+    trace: isCI ? 'off' : 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
   },
