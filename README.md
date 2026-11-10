@@ -34,7 +34,7 @@ Other commands:
 
 1. **Get the extension.** [scripts/fetch-extension.ts](scripts/fetch-extension.ts) downloads the extension (`.crx`) from the Chrome Web Store and unpacks it into `extension/`. It isn't committed, so this repo doesn't redistribute Prompt Security's code. If `extension/` already exists, it is used as is, so you can also drop in a local copy.
 2. **Load it.** Each test starts a fresh Chromium profile with `--load-extension` ([src/fixtures.ts](src/fixtures.ts)).
-3. **Configure it like a user would.** The fixture opens the extension's popup, enters the API domain and key, and waits for the extension's first sync with the backend (its `Heartbeat completed` log). Until that sync is done, the extension doesn't know which sites are GenAI apps.
+3. **Configure it like a user would.** The fixture opens the extension's popup, enters the API domain and key, and waits until the settings are saved in the extension's storage. It then waits until every config sync ("heartbeat") with the backend has finished and the backend traffic has been quiet for a second. Saving can start more than one sync at once, and until they are done the extension doesn't know which sites are GenAI apps.
 4. **Visit sites and check the result.**
    - **Blocked:** the extension redirects the tab to `chrome-extension://<id>/html/pageOverlay.html?…&type=blockPage`. The test checks that URL, the "Access Denied" title, the blocked domain in the message, and that no bypass button is offered ([src/pages/BlockPage.ts](src/pages/BlockPage.ts)).
    - **Allowed:** the test waits until the extension has actually made its decision for the domain (read from the extension's service-worker log), checks the decision isn't `Block`, and checks the tab stays on the site ([src/assertions.ts](src/assertions.ts)). So "not blocked" never just means "the extension hadn't got to it yet".
@@ -48,11 +48,13 @@ For each GenAI domain, the extension asks the Prompt Security backend what to do
 | `enforcement` | **Intercepted** and replaced by the policy in [src/policy.ts](src/policy.ts) (allow `chatgpt.com`, block every other GenAI domain). Everything else (heartbeat, config, assets) goes to the real backend. | Deterministic check that the extension enforces whatever the admin configures |
 | `live` | Real backend, no interception | End-to-end check of the actual tenant configuration |
 
-The interception uses Playwright's `context.route()`. Requests from the extension's service worker can be intercepted with `PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1`, which is set in [playwright.config.ts](playwright.config.ts).
+The interception uses Playwright's `context.route()`. Requests from the extension's service worker can be intercepted with `PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1`, which is set in [playwright.config.ts](playwright.config.ts). As a safeguard, a mocked test fails if the extension made decisions without the mock ever being hit, so it can never pass silently against the real backend.
+
+CI doesn't record Playwright traces, because traces contain the typed API key and the repo's artifacts are public. Locally, traces are kept for failed tests.
 
 ### Known issue: the live tenant doesn't block Gemini
 
-As of 2026-11-10, the backend tenant for the provided API key returns `Protect` (allow + inspect) for **every** GenAI domain, including `gemini.google.com`. So Gemini isn't actually blocked. The live Gemini test is therefore marked as an expected failure (`test.fail`) with this explanation. If the tenant gets fixed, Playwright reports the test as "unexpectedly passed" and fails the run, which is the signal to remove the marker.
+As of 2026-11-10, the backend tenant for the provided API key returns `Protect` (allow + inspect) for **every** GenAI domain, including `gemini.google.com`. So Gemini isn't actually blocked. The live Gemini test first requires the extension to evaluate Gemini with the live backend. Only when the backend's answer is something other than `Block` is the test marked as an expected failure (`test.fail`) with this explanation. Any other failure (backend unreachable, wrong key, no decision) still fails the run. If the tenant gets fixed, the test simply passes.
 
 ## Test scenarios
 

@@ -3,12 +3,9 @@ import { expect, test, visit } from '../../src/fixtures.ts';
 import { BlockPage } from '../../src/pages/BlockPage.ts';
 
 test.describe('Navigation edge cases', () => {
-  test('moving from an allowed app to a blocked app in the same tab gets blocked', async ({
-    page,
-    waitForDecision,
-  }) => {
+  test('moving from an allowed app to a blocked app in the same tab gets blocked', async ({ page, decisions }) => {
     await visit(page, 'https://chatgpt.com/');
-    await expectAllowed(page, 'chatgpt.com', waitForDecision);
+    await expectAllowed(page, 'chatgpt.com', decisions);
 
     await visit(page, 'https://gemini.google.com/');
     await new BlockPage(page).expectShownFor('gemini.google.com');
