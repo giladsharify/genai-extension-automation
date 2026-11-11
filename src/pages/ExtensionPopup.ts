@@ -1,4 +1,4 @@
-import { expect, type BrowserContext, type Page } from '@playwright/test';
+import { expect, type BrowserContext, type Locator, type Page } from '@playwright/test';
 
 /** Page object for the extension's toolbar popup (html/popup.html). */
 export class ExtensionPopup {
@@ -33,8 +33,22 @@ export class ExtensionPopup {
    */
   async save(apiDomain: string, apiKey: string): Promise<void> {
     await this.apiDomain.fill(apiDomain);
-    await this.apiKey.fill(apiKey);
+    await this.fillSecret(this.apiKey, apiKey);
     await this.saveButton.click();
+  }
+
+  /**
+   * Type a secret without it appearing in reports. locator.fill() puts the value
+   * in the step title ('Fill "<value>"'), which ends up in the HTML report.
+   * evaluate() steps don't show their arguments.
+   */
+  private async fillSecret(input: Locator, value: string): Promise<void> {
+    await input.evaluate((el: HTMLInputElement, v) => {
+      el.focus();
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, value);
   }
 
   /** Reopen the popup and check it shows the saved settings. */
