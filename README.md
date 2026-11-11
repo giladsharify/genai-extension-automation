@@ -65,9 +65,22 @@ As of 2026-11-10, the backend tenant for the provided API key returns `Protect` 
 | Negative (blocked) | Gemini (root and deep link), Perplexity, DeepSeek, Mistral; block page doesn't offer a bypass |
 | Navigation | Allowed → blocked in the same tab; blocked app in a new tab; still blocked on a second visit; non-GenAI site isn't evaluated or blocked |
 | Control | No extension → Gemini loads; extension installed but not configured → nothing evaluated or blocked |
+| Backend failures | Rule request returns 500 or 503, or the connection fails → current behavior (fails open) is pinned, and the next visit after recovery is blocked |
+| Response time | Rule answer after 4 s is enforced; after 6 s it's past the extension's 5 s timeout (fails open) |
+| Worker lifecycle | Background worker stopped through `chrome://serviceworker-internals` (as Chrome does when it's idle) → blocked app still blocked, allowed app still allowed |
+| Policy change | Newly blocked app keeps its cached "allowed" decision until a config sync, then is blocked; unblocked app is allowed after a sync |
+| Domain matching | Lookalikes (`chatgpt.com.evil.test`, `evilchatgpt.com`, …) and unknown subdomains are never evaluated as known GenAI apps; real hosts are evaluated under their exact hostname |
 | Live | ChatGPT allowed; Gemini blocked (expected failure, see above) |
 
 Blocked and allowed apps are data-driven from [src/policy.ts](src/policy.ts). To cover another app, add a line there.
+
+## Findings about the extension (v7.1.80)
+
+These came out of the resilience tests. The tests pin the current behavior, so any change will be noticed.
+
+1. **Fails open when the backend can't answer.** If the rule request errors (500/503), the connection fails, or the answer takes more than 5 s, the site is **not** blocked. A backend outage or a slow network therefore lets blocked apps through. To pin fail-closed instead, flip `OUTAGE_BEHAVIOR` in [resilience.spec.ts](tests/enforcement/resilience.spec.ts).
+2. **Policy changes are not immediate.** Decisions are cached per domain. A domain that was already evaluated keeps its old decision until a config sync clears the cache: the periodic sync (at most every 15 minutes) or a 12-hour reset.
+3. **GenAI apps are matched by exact hostname.** Unknown subdomains and lookalike domains aren't evaluated at all. That's safe for the allowlist (lookalikes can't inherit `chatgpt.com`'s "allowed"), but a GenAI app on a hostname the extension doesn't know isn't covered.
 
 ## CI
 
@@ -99,6 +112,7 @@ tests/live/                  real-backend tests
 
 - **Third-party sites.** ChatGPT, Claude and others often show a Cloudflare bot check to automated browsers. The tests check the *extension's* behavior (its decision and the tab URL), not that the site's UI loaded, so a bot check doesn't affect the result.
 - **Internal log signal.** "Decision made" and "sync finished" are read from the extension's service-worker log. That's reliable today, but it's internal. A test hook or a status API from the extension would be more stable.
+- **Policy-change timing isn't tested end to end.** The tests force a config sync by re-saving the settings, which clears the extension's cache directly. The production path (the periodic sync notices newer rules within 15 minutes) would need the test to wait 15 minutes, or a way to speed up the extension's timers.
 - **Ideas for more coverage:**
   - managed-policy configuration (Chrome enterprise policy, see the extension's `schema.json`) instead of the popup
   - Microsoft Edge
