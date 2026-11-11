@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ExtensionPopup } from './pages/ExtensionPopup.ts';
-import { ruleActionFor } from './policy.ts';
+import { normalizeDomain, ruleActionFor, type RuleAction } from './policy.ts';
 
 export const EXTENSION_PATH = resolve(import.meta.dirname, '..', 'extension');
 
@@ -24,10 +24,23 @@ export interface BackendTraffic {
   lastActivityAt: number;
 }
 
-/** What the rule-endpoint mock did during the test. */
-export interface MockStats {
+/**
+ * Controls and records the rule-endpoint mock. Tests can change these fields
+ * at any time; the next rule request uses the new values.
+ */
+export interface RuleMock {
+  /** Rule requests answered (or failed on purpose) by the mock. */
   hits: number;
+  /** Requests the mock could not understand. */
   errors: string[];
+  /** Domains the extension asked about, in order. */
+  requests: string[];
+  /** Per-domain action that replaces src/policy.ts (key: domain without "www."). */
+  overrides: Map<string, RuleAction>;
+  /** Make the rule endpoint fail: an HTTP error status, or a dropped connection. */
+  failure: null | { status: number } | 'connection-failed';
+  /** Delay before answering, in ms. The extension gives up after 5 s. */
+  delayMs: number;
 }
 
 export interface Options {
@@ -52,7 +65,15 @@ export interface Fixtures {
   /** Every rule decision the extension logged during the test, in order. */
   decisions: Decision[];
   backend: BackendTraffic;
-  mockStats: MockStats;
+  ruleMock: RuleMock;
+  /**
+   * Force the extension to re-sync its configuration with the backend, the way it
+   * does when settings are saved, and wait for it. This also clears the extension's
+   * cached per-domain decisions, so the next visit asks the backend again.
+   * (In production a policy change arrives via the periodic sync, at most every
+   * 15 minutes; tests can't wait for that.)
+   */
+  forceConfigSync: () => Promise<void>;
 }
 
 const DECISION_LOG = /Handling domain action '(\w+)' \| domain=([^\s,|]+)/;
@@ -78,12 +99,12 @@ export const test = base.extend<Fixtures & Options>({
     await use({ inFlight: 0, heartbeatsStarted: 0, heartbeatsOk: 0, lastActivityAt: 0 });
   },
 
-  mockStats: async ({}, use) => {
-    await use({ hits: 0, errors: [] });
+  ruleMock: async ({}, use) => {
+    await use({ hits: 0, errors: [], requests: [], overrides: new Map(), failure: null, delayMs: 0 });
   },
 
   context: async (
-    { withExtension, policyMode, decisions, extensionLogs, backend, mockStats, headless },
+    { withExtension, policyMode, decisions, extensionLogs, backend, ruleMock, headless },
     use,
     testInfo,
   ) => {
@@ -110,7 +131,7 @@ export const test = base.extend<Fixtures & Options>({
     trackBackendTraffic(context, backend);
 
     if (withExtension && policyMode === 'mock') {
-      await mockRuleEndpoints(context, mockStats);
+      await mockRuleEndpoints(context, ruleMock);
     }
 
     await use(context);
@@ -125,10 +146,10 @@ export const test = base.extend<Fixtures & Options>({
     }
     // Guard against a mocked test silently talking to the real backend
     // (e.g. if Playwright stops routing service-worker requests).
-    if (mockStats.errors.length) {
-      throw new Error(`Rule mock could not handle request(s): ${mockStats.errors.join('; ')}`);
+    if (ruleMock.errors.length) {
+      throw new Error(`Rule mock could not handle request(s): ${ruleMock.errors.join('; ')}`);
     }
-    if (withExtension && policyMode === 'mock' && decisions.length > 0 && mockStats.hits === 0) {
+    if (withExtension && policyMode === 'mock' && decisions.length > 0 && ruleMock.hits === 0) {
       throw new Error(
         'The extension made rule decisions but the rule mock was never hit, so the real backend decided. ' +
           'Check the route patterns in mockRuleEndpoints() (did the extension change endpoints?) and that ' +
@@ -167,6 +188,23 @@ export const test = base.extend<Fixtures & Options>({
     if (testInfo.status !== testInfo.expectedStatus) {
       await testInfo.attach('final-url', { body: page.url(), contentType: 'text/plain' });
     }
+  },
+  forceConfigSync: async ({ context, extensionId, backend, extensionLogs }, use) => {
+    await use(async () => {
+      const cacheClearsBefore = extensionLogs.filter((l) => l.includes('Clearing cache')).length;
+      const heartbeatsBefore = backend.heartbeatsStarted;
+      const popup = await ExtensionPopup.open(context, extensionId);
+      await popup.save(process.env.PS_API_DOMAIN!, process.env.PS_API_KEY!);
+      await popup.close();
+      await expect
+        .poll(() => backend.heartbeatsStarted, { message: 'saving settings did not start a config sync' })
+        .toBeGreaterThan(heartbeatsBefore);
+      await waitForBackendSync(backend, extensionLogs);
+      expect(
+        extensionLogs.filter((l) => l.includes('Clearing cache')).length,
+        'config sync should clear the extension\'s cached decisions',
+      ).toBeGreaterThan(cacheClearsBefore);
+    });
   },
 });
 
@@ -242,63 +280,71 @@ function trackBackendTraffic(context: BrowserContext, backend: BackendTraffic): 
 }
 
 /**
- * Replace the backend's per-domain rule answer with the policy from src/policy.ts.
- * Everything else (heartbeat, config, assets) still goes to the real backend.
+ * Replace the backend's per-domain rule answer with the policy from src/policy.ts
+ * (or whatever the test set on the RuleMock). Everything else (heartbeat, config,
+ * assets) still goes to the real backend.
  * Requires PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1 (set in playwright.config.ts)
  * so routes also apply to the extension's service worker.
  */
-async function mockRuleEndpoints(context: BrowserContext, stats: MockStats): Promise<void> {
-  /** Read the domain the extension is asking about; on a malformed request, let it through and record why. */
-  const domainOf = (body: unknown, endpoint: string): string | null => {
-    const domain = (body as { domain?: unknown } | null)?.domain;
-    if (typeof domain === 'string' && domain) return domain;
-    stats.errors.push(`${endpoint}: request has no "domain" field`);
-    return null;
-  };
-  const parse = (postData: string | null, endpoint: string): unknown => {
+async function mockRuleEndpoints(context: BrowserContext, mock: RuleMock): Promise<void> {
+  /** Read the domain the extension is asking about; on a malformed request, record why. */
+  const domainOf = (postData: string | null, endpoint: string): string | null => {
+    let body: unknown = null;
     try {
-      return postData ? JSON.parse(postData) : null;
+      body = postData ? JSON.parse(postData) : null;
     } catch {
-      stats.errors.push(`${endpoint}: request body is not JSON`);
+      mock.errors.push(`${endpoint}: request body is not JSON`);
       return null;
     }
+    const domain = (body as { domain?: unknown } | null)?.domain;
+    if (typeof domain === 'string' && domain) return domain;
+    mock.errors.push(`${endpoint}: request has no "domain" field`);
+    return null;
   };
 
+  const handle = (endpoint: string, buildBody: (action: RuleAction) => unknown) =>
+    context.route(`**/api/${endpoint}`, async (route) => {
+      const domain = domainOf(route.request().postData(), endpoint);
+      if (!domain) return route.continue();
+      mock.hits++;
+      mock.requests.push(domain);
+      if (mock.delayMs) await new Promise((r) => setTimeout(r, mock.delayMs));
+      try {
+        if (mock.failure === 'connection-failed') return await route.abort('connectionfailed');
+        if (mock.failure) return await route.fulfill({ status: mock.failure.status, body: 'mocked failure' });
+        const action = mock.overrides.get(normalizeDomain(domain)) ?? ruleActionFor(domain);
+        await route.fulfill({ json: buildBody(action) });
+      } catch (err) {
+        // The extension aborts requests after 5 s; answering a dead request throws. That's expected.
+        if (!/Request context disposed|Route is already handled|Target .* closed|aborted/i.test(String(err))) throw err;
+      }
+    });
+
   // Current extension builds call this endpoint.
-  await context.route('**/api/employee/evaluate-rule', async (route) => {
-    const domain = domainOf(parse(route.request().postData(), 'evaluate-rule'), 'evaluate-rule');
-    if (!domain) return route.continue();
-    stats.hits++;
-    await route.fulfill({
-      json: {
-        ruleInfo: {
-          action: ruleActionFor(domain),
-          isLogViolationsOnly: false,
-          isWarnBeforeAccess: false,
-          showDetectViolationsPopup: false,
-          allowBypassProtections: false,
-          dataProtection: {
-            blockFileUpload: false,
-            blockFileDownload: false,
-            blockContentPaste: false,
-            inspectFilesUploaded: false,
-          },
-        },
-        autocompleteRegexes: [],
-        platformType: 'web',
+  await handle('employee/evaluate-rule', (action) => ({
+    ruleInfo: {
+      action,
+      isLogViolationsOnly: false,
+      isWarnBeforeAccess: false,
+      showDetectViolationsPopup: false,
+      allowBypassProtections: false,
+      dataProtection: {
+        blockFileUpload: false,
+        blockFileDownload: false,
+        blockContentPaste: false,
+        inspectFilesUploaded: false,
       },
-    });
-  });
+    },
+    autocompleteRegexes: [],
+    platformType: 'web',
+  }));
   // Older rule engine endpoint, used when the "ruleBaseV2" setting is off.
-  await context.route('**/api/extension/get-rule-action', async (route) => {
-    const domain = domainOf(parse(route.request().postData(), 'get-rule-action'), 'get-rule-action');
-    if (!domain) return route.continue();
-    stats.hits++;
-    const action = ruleActionFor(domain) === 'Block' ? 'Block' : 'Inspect';
-    await route.fulfill({
-      json: { action, canBypassBlock: 'Prevent', canBypassInspection: 'Prevent', warnBeforeDomainUsage: 'No' },
-    });
-  });
+  await handle('extension/get-rule-action', (action) => ({
+    action: action === 'Block' ? 'Block' : 'Inspect',
+    canBypassBlock: 'Prevent',
+    canBypassInspection: 'Prevent',
+    warnBeforeDomainUsage: 'No',
+  }));
 }
 
 /**
