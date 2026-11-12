@@ -6,7 +6,7 @@ import { ServiceWorkerInternals } from '../../src/pages/ServiceWorkerInternals.t
 /**
  * How the extension behaves when it cannot get a rule answer from the backend.
  *
- * OBSERVED (extension v7.1.80): it FAILS OPEN. If the rule request errors, drops,
+ * OBSERVED (extension v7.1.89): it FAILS OPEN. If the rule request errors, drops,
  * or takes longer than the extension's 5 s timeout, the site is not blocked.
  * These tests pin that behavior so a change is noticed. If product decides the
  * extension should fail closed, flip OUTAGE_BEHAVIOR and the tests follow.

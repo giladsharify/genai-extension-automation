@@ -8,7 +8,7 @@ import { expect, test, visit } from '../../src/fixtures.ts';
  * with context.route(). The browser still navigates to the real URL, so the
  * extension sees exactly the hostname a user would.
  *
- * OBSERVED (v7.1.80): the extension recognizes GenAI apps by exact hostname.
+ * OBSERVED (v7.1.89): the extension recognizes GenAI apps by exact hostname.
  * Lookalikes and unknown subdomains are not treated as GenAI apps at all: they
  * are never evaluated, so they can't inherit chatgpt.com's "allowed" decision
  * (or gemini.google.com's "blocked" one).

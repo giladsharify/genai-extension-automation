@@ -3,6 +3,7 @@
  * Usage: node scripts/junit-summary.ts test-results/junit.xml >> "$GITHUB_STEP_SUMMARY"
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { installedExtensionVersion } from '../src/extension.ts';
 
 const file = process.argv[2] ?? 'test-results/junit.xml';
 if (!existsSync(file)) {
@@ -40,7 +41,7 @@ for (const m of xml.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g
 }
 
 console.log('## Extension allow/block test results\n');
-console.log(`**${passed} passed, ${failed} failed, ${skipped} skipped**\n`);
+console.log(`**${passed} passed, ${failed} failed, ${skipped} skipped** · extension v${installedExtensionVersion() ?? 'unknown'}\n`);
 console.log('| Result | File | Test | Time |');
 console.log('| --- | --- | --- | --- |');
 console.log(rows.join('\n'));
