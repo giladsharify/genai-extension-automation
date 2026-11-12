@@ -2,7 +2,8 @@ import { defineConfig } from '@playwright/test';
 import 'dotenv/config';
 import type { Options } from './src/fixtures.ts';
 
-// Let page.route()/context.route() see requests made by the extension's service worker.
+// Let context.route() see requests made by the extension's service worker.
+// Default behavior since Playwright 1.65; kept for older versions.
 process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
 
 const isCI = !!process.env.CI;
@@ -26,7 +27,8 @@ export default defineConfig<Options>({
     // and CI artifacts of a public repo are downloadable, so only keep traces locally.
     trace: isCI ? 'off' : 'retain-on-failure',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    // Videos are recorded by the context fixture (src/fixtures.ts): Playwright's `video`
+    // option doesn't apply to the persistent contexts that extensions need.
   },
   projects: [
     {

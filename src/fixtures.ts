@@ -1,11 +1,12 @@
 import { test as base, chromium, expect, type BrowserContext, type Page, type Worker } from '@playwright/test';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { EXTENSION_PATH, installedExtensionVersion } from './extension.ts';
 import { ExtensionPopup } from './pages/ExtensionPopup.ts';
 import { normalizeDomain, ruleActionFor, type RuleAction } from './policy.ts';
 
-export const EXTENSION_PATH = resolve(import.meta.dirname, '..', 'extension');
+export { EXTENSION_PATH };
 
 /** A decision the extension made for a domain ("Block", "Inspect", ...). */
 export interface Decision {
@@ -111,12 +112,20 @@ export const test = base.extend<Fixtures & Options>({
     if (withExtension && !existsSync(join(EXTENSION_PATH, 'manifest.json'))) {
       throw new Error(`Extension not found at ${EXTENSION_PATH}. Run "npm run fetch-extension".`);
     }
+    if (withExtension) {
+      testInfo.annotations.push({ type: 'extension version', description: `v${installedExtensionVersion()}` });
+    }
     const userDataDir = mkdtempSync(join(tmpdir(), 'ps-ext-'));
+    // Playwright's `video` option only applies to contexts it creates itself, so record
+    // here and keep the videos only when the test failed (like 'retain-on-failure').
+    // The API key field is a password field, so videos don't show the key.
+    const videoDir = testInfo.outputPath('videos');
     const context = await chromium.launchPersistentContext(userDataDir, {
       // Full Chromium (not the headless shell) is required for extensions.
       channel: 'chromium',
       headless,
       args: withExtension ? [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`] : [],
+      recordVideo: { dir: videoDir },
     });
 
     // Attach listeners before anything else so no early log line or request is missed.
@@ -136,8 +145,15 @@ export const test = base.extend<Fixtures & Options>({
 
     await use(context);
 
-    await context.close();
+    await context.close(); // also finishes writing the videos
     rmSync(userDataDir, { recursive: true, force: true });
+    if (testInfo.status === testInfo.expectedStatus) {
+      rmSync(videoDir, { recursive: true, force: true });
+    } else if (existsSync(videoDir)) {
+      for (const file of readdirSync(videoDir)) {
+        await testInfo.attach(`video ${file}`, { path: join(videoDir, file), contentType: 'video/webm' });
+      }
+    }
     if (decisions.length) {
       testInfo.annotations.push({
         type: 'extension decisions',
@@ -149,12 +165,18 @@ export const test = base.extend<Fixtures & Options>({
     if (ruleMock.errors.length) {
       throw new Error(`Rule mock could not handle request(s): ${ruleMock.errors.join('; ')}`);
     }
-    if (withExtension && policyMode === 'mock' && decisions.length > 0 && ruleMock.hits === 0) {
-      throw new Error(
-        'The extension made rule decisions but the rule mock was never hit, so the real backend decided. ' +
-          'Check the route patterns in mockRuleEndpoints() (did the extension change endpoints?) and that ' +
-          'Playwright still routes service-worker requests (PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS).',
-      );
+    // Every domain the extension decided on must have been answered by the mock;
+    // otherwise the real backend decided it (e.g. the extension added a new endpoint).
+    if (withExtension && policyMode === 'mock') {
+      const mocked = new Set(ruleMock.requests.map(normalizeDomain));
+      const unmocked = [...new Set(decisions.map((d) => normalizeDomain(d.domain)))].filter((d) => !mocked.has(d));
+      if (unmocked.length) {
+        throw new Error(
+          `The extension decided on ${unmocked.join(', ')} without asking the rule mock, so the real backend decided. ` +
+            'Check the route patterns in mockRuleEndpoints() (did the extension change endpoints?) and that ' +
+            'Playwright still routes service-worker requests.',
+        );
+      }
     }
   },
 
@@ -283,8 +305,9 @@ function trackBackendTraffic(context: BrowserContext, backend: BackendTraffic): 
  * Replace the backend's per-domain rule answer with the policy from src/policy.ts
  * (or whatever the test set on the RuleMock). Everything else (heartbeat, config,
  * assets) still goes to the real backend.
- * Requires PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1 (set in playwright.config.ts)
- * so routes also apply to the extension's service worker.
+ * Routes also apply to the extension's service worker. That works by default in
+ * Playwright 1.65; older versions need PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1
+ * (set in playwright.config.ts).
  */
 async function mockRuleEndpoints(context: BrowserContext, mock: RuleMock): Promise<void> {
   /** Read the domain the extension is asking about; on a malformed request, record why. */
